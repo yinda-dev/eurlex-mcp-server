@@ -18,6 +18,11 @@ RUN mkdir /prod_modules && \
 FROM node:24.5-alpine
 
 RUN apk upgrade --no-cache zlib
+
+# Install ca-certificates so update-ca-certificates is available for
+# custom CA injection at container startup via docker-entrypoint.sh
+RUN apk add --no-cache ca-certificates
+
 RUN rm -rf /usr/local/lib/node_modules/npm \
     && rm -f /usr/local/bin/npm /usr/local/bin/npx
 WORKDIR /app
@@ -32,10 +37,19 @@ ENV NODE_USE_ENV_PROXY=1
 COPY --from=builder /prod_modules/node_modules/ ./node_modules/
 COPY --from=builder /app/dist/ ./dist/
 
+# Copy and prepare the entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    # Create the mount-point so the directory always exists even without a bind-mount
+ && mkdir -p /opt/custom-certificates \
+    # Ensure the entrypoint can write to the system CA directory (runs as root before dropping to node)
+ && chmod 755 /usr/local/share/ca-certificates
+
 EXPOSE 3001
-USER node
+
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/http.js"]
