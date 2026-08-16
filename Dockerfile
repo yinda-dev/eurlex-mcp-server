@@ -31,7 +31,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
  && chmod 755 /usr/local/share/ca-certificates
 
 EXPOSE 3001
-USER node
 
 # The entrypoint runs as root so it can install certificates, then execs the CMD as the node user.
 # Note: USER node is intentionally omitted here so the script can
