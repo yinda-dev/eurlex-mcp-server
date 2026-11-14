@@ -221,7 +221,7 @@ Retrieve the full text of a document, identified by **exactly one** of `celex_id
 
 ### eurlex_metadata
 
-Retrieve structured metadata for a document: document/entry-into-force/end-of-validity/transposition dates, in-force status, authors, legal basis, EuroVoc descriptors, and directory codes. Identified by **exactly one** of `celex_id`, `eli`, or `oj_ref` (same identifier inputs as `eurlex_fetch`).
+Retrieve structured metadata for a document: dates (document, entry into force, application, end of validity, transposition), in-force status, authors, legal basis, EuroVoc descriptors, and directory codes. Identified by **exactly one** of `celex_id`, `eli`, or `oj_ref` (same identifier inputs as `eurlex_fetch`).
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -235,7 +235,8 @@ Retrieve structured metadata for a document: document/entry-into-force/end-of-va
 Notes on the response:
 - `authors` lists the resolved agent names (e.g. "European Parliament", "Council of the European Union") instead of an empty array.
 - `legal_basis` lists the CELEX IDs of the acts this document is based on.
-- Date fields (`date_document`, `date_entry_into_force`, `date_end_of_validity`, `date_transposition`) are `null` when absent -- including Cellar's `9999-12-31` sentinel for acts with no defined end of validity, which is normalized to `null`.
+- Date fields (`date_document`, `date_entry_into_force`, `date_end_of_validity`, `date_transposition`, `date_application`) are `null` when absent -- including Cellar's `9999-12-31` sentinel for acts with no defined end of validity, which is normalized to `null`. When Cellar holds several values, `date_document` and `date_transposition` report the earliest and `date_end_of_validity` the latest.
+- `date_entry_into_force` and `date_application` are distinct: the GDPR entered into force on `2016-05-24` but applies from `2018-05-25`. Cellar stores every such "date of effect" under one property; `dates_effect` lists all of them ascending with a `type` (`entry_into_force`, `application`, `partial_application`) and the article note (e.g. `"Partial application See Art 113(a)"`). The types come from Cellar's work notice; if that request fails, or the notice states no type for a date, the entry carries `type: "unknown"`, and `date_entry_into_force` is the earliest date not before `date_document`.
 - `directory_codes` are human-readable (`"{code-tail}: {label}"`, where `code-tail` is the fragment after the last `/` of the directory-code URI), not raw URIs.
 
 ### eurlex_citations
@@ -390,6 +391,7 @@ pnpm build
 ```bash
 pnpm test              # unit tests
 pnpm test:integration  # integration tests (hits real API)
+pnpm test:integration tests/integration/effectDates.integration.test.ts  # one file — no "--"
 ```
 
 ## Limitations
@@ -400,6 +402,27 @@ pnpm test:integration  # integration tests (hits real API)
 - **Response size**: Full text is returned per call in `max_chars` slices (default 20,000 characters) to stay within LLM context limits -- use `offset`/`next_offset` on `eurlex_fetch`/`eurlex_consolidated`/`eurlex_summary` to read the rest.
 - **SPARQL timeouts**: Complex queries may occasionally time out on the Cellar endpoint despite the built-in retry with backoff; narrow broad `eurlex_search`/`eurlex_by_eurovoc` queries with `resource_type` or date filters if this happens.
 - **Search ordering**: `eurlex_search` results are sorted newest-first within the fetched sample only -- for very broad queries this is not guaranteed to be the single globally newest match.
+
+## Troubleshooting
+
+### `invalid outputSchema: JSON Schema declares an unsupported dialect ("$schema": ".../draft-07/schema#")`
+
+Some MCP client builds (Claude Desktop, Cowork, Claude Code releases that bundle a
+pre-release `@modelcontextprotocol/client` 2.0.0-alpha/beta) reject **every** tool call with:
+
+```
+Error: Tool '<name>' has an invalid outputSchema: JSON Schema declares an unsupported
+dialect ("$schema": "http://json-schema.org/draft-07/schema#"). The default validator
+supports JSON Schema 2020-12 only; ...
+```
+
+The error fires inside the client before any request reaches this server. Since
+**v2.4.0** the server omits the `$schema` key from its tool schemas, which every client
+accepts (a schema without `$schema` is read as 2020-12 per the MCP spec). If you still see
+the error you are running an older server build: `npx` caches versions, so use
+`npx -y eurlex-mcp-server@latest`, or pull the current Docker image. Background: this
+repo's issue #49; the client-side check was relaxed upstream in
+`@modelcontextprotocol/client` 2.0.0 (modelcontextprotocol/typescript-sdk#2532).
 
 ## Contributing
 

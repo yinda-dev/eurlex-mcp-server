@@ -78,11 +78,13 @@ describe('CellarClient – Metadata', () => {
       expect(sparql).toContain('PREFIX skos:')
     })
 
-    it('M5f – authors use agent skos:prefLabel, NOT the broken cdm:agent_name', () => {
+    it('M5f – authors prefer agent skos:prefLabel over the bare cdm:agent_name fallback (#52)', () => {
       const sparql = client.buildMetadataQuery('32021R0694', 'DEU')
 
-      // The old (bug) property must be gone entirely
-      expect(sparql).not.toContain('agent_name')
+      // The old (bug) query bound ?authorName directly off cdm:agent_name — that
+      // bare pattern must be gone; agent_name is now only a COALESCE fallback
+      // for person agents (see M5k) after the prefLabel lookups.
+      expect(sparql).not.toMatch(/agent_name \?authorName/)
       // Author label = language prefLabel, fallback English, last resort URI tail.
       expect(sparql).toContain('work_created_by_agent')
       expect(sparql).toContain('COALESCE')
@@ -97,6 +99,15 @@ describe('CellarClient – Metadata', () => {
       const sparqlFra = client.buildMetadataQuery('32021R0694', 'FRA')
       expect(sparqlFra).toContain('"fr"')
       expect(sparqlFra).toContain('"en"')
+    })
+
+    it('M5k – authors fall back to cdm:agent_name for person agents (Advocates General)', () => {
+      const sparql = client.buildMetadataQuery('62021CJ0180', 'DEU')
+
+      // Persons (e.g. Advocates General) carry cdm:agent_name but no skos:prefLabel;
+      // institutions the reverse. Both must resolve to a name, never to the URI tail.
+      expect(sparql).toMatch(/OPTIONAL \{ \?agent cdm:agent_name \?agentName \. \}/)
+      expect(sparql).toMatch(/COALESCE\(\?agentLabelLang, \?agentLabelEn, \?agentName, REPLACE\(STR\(\?agent\)/)
     })
 
     it('M5h – query includes legal basis via resource_legal_based_on_resource_legal', () => {
@@ -116,6 +127,21 @@ describe('CellarClient – Metadata', () => {
       expect(sparql).toContain('resource_legal_is_about_concept_directory-code')
       expect(sparql).toContain('CONCAT')
       expect(sparql).toContain('BOUND(?dirLabel)')
+    })
+
+    it('M5j – groups by ?work and aggregates every scalar (no scalar GROUP BY keys)', () => {
+      const sparql = client.buildMetadataQuery('32021R0694', 'DEU')
+
+      expect(sparql).toContain('GROUP BY ?work')
+      expect(sparql).not.toContain('GROUP BY ?title')
+      expect(sparql).toContain('AS ?dateForces')
+      expect(sparql).toMatch(/GROUP_CONCAT\(DISTINCT STR\(\?dateForceRaw\)/)
+      expect(sparql).toMatch(/MIN\(\?dateDocRaw\) AS \?dateDoc/)
+      expect(sparql).toMatch(/MAX\(\?dateEndRaw\) AS \?dateEnd/)
+      expect(sparql).toMatch(/SAMPLE\(\?titleRaw\) AS \?title/)
+      expect(sparql).toMatch(/SAMPLE\(\?inForceRaw\) AS \?inForce/)
+      expect(sparql).toMatch(/MIN\(\?dateTransRaw\) AS \?dateTrans/)
+      expect(sparql).toMatch(/SAMPLE\(\?resTypeRaw\) AS \?resType/)
     })
   })
 
@@ -140,7 +166,7 @@ describe('CellarClient – Metadata', () => {
         value: 'Verordnung (EU) 2016/679 des Europäischen Parlaments und des Rates',
       },
       dateDoc: { type: 'literal', value: '2016-04-27' },
-      dateForce: { type: 'literal', value: '2016-05-24' },
+      dateForces: { type: 'literal', value: '2018-05-25|||2016-05-24' },
       dateEnd: { type: 'literal', value: '2030-12-31' },
       inForce: { type: 'literal', value: '1' },
       dateTrans: { type: 'literal', value: '2023-01-01' },
@@ -169,6 +195,11 @@ describe('CellarClient – Metadata', () => {
         celex_id: '32016R0679',
         date_document: '2016-04-27',
         date_entry_into_force: '2016-05-24',
+        date_application: null,
+        dates_effect: [
+          { date: '2016-05-24', type: 'unknown', note: null },
+          { date: '2018-05-25', type: 'unknown', note: null },
+        ],
         date_end_of_validity: '2030-12-31',
         in_force: true,
         date_transposition: '2023-01-01',
@@ -216,7 +247,38 @@ describe('CellarClient – Metadata', () => {
       expect(result.legal_basis).toEqual(['12012E016', '12012E114'])
     })
 
-    it('M6d – directory codes preserve combined and label-less entries', async () => {
+    it('M6d – picks the earliest entry-into-force date not before date_document (DSA)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () =>
+          makeMetadataSparqlResponse({
+            ...fullBinding,
+            dateDoc: { type: 'literal', value: '2022-10-19' },
+            dateForces: { type: 'literal', value: '2022-02-17|||2022-11-16' },
+          }),
+      })
+
+      const result = await client.metadataQuery('32022R2065', 'DEU')
+      expect(result.date_entry_into_force).toBe('2022-11-16')
+      expect(result.dates_effect.map((d) => d.date)).toEqual(['2022-02-17', '2022-11-16'])
+      expect(result.dates_effect.every((d) => d.type === 'unknown' && d.note === null)).toBe(true)
+    })
+
+    it('M6e – no entry-into-force dates → null and empty dates_effect', async () => {
+      const { dateForces: _omit, ...withoutDates } = fullBinding
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => makeMetadataSparqlResponse(withoutDates),
+      })
+
+      const result = await client.metadataQuery('32016R0679', 'DEU')
+      expect(result.date_entry_into_force).toBeNull()
+      expect(result.dates_effect).toEqual([])
+      expect(result.date_application).toBeNull()
+    })
+
+    // Renamed from M6d to avoid colliding with the DSA/empty-dates tests above.
+    it('M6f – directory codes preserve combined and label-less entries', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () =>

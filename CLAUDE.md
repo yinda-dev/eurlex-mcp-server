@@ -34,6 +34,7 @@ pnpm test                # Unit tests (vitest run) — fetch is mocked, no netwo
 pnpm run test:watch      # Unit tests in watch mode
 pnpm run test:coverage   # Unit tests with V8 coverage report
 pnpm run test:integration # Live Cellar tests (network-dependent, separate config)
+pnpm run test:integration tests/integration/<file>  # one live file — never insert "--": vitest then runs the whole suite
 ```
 
 - **Unit tests** (`tests/*.test.ts`) mock `fetch` — they never touch the
@@ -77,7 +78,10 @@ src/
 ├── utils.ts              # processContent / stripHtml / parseOutline / sortDedupSlice / toolError / toCallToolResult
 ├── services/
 │   ├── cellarClient.ts   # ALL SPARQL + REST: CellarClient class, withRetry, TTL caches, escapeSparqlString
+│   ├── cellarNotice.ts    # Pure parser: typed effect dates (EV/MA) from the Cellar REST object notice
+│   ├── effectDates.ts     # Pure: entry-into-force heuristic + merge of typed notice dates into MetadataResult
 │   ├── identifiers.ts     # Pure (network-free) ELI / OJ-ref → canonical-URI normalization
+│   ├── schemaDialectShim.ts # Strips `$schema` (draft-07) from tools/list — workaround for #49, drop with #50
 │   └── ttlCache.ts        # TtlCache: read-only expiry, no timers, caches null ("not found")
 ├── schemas/               # One Zod file per tool: input schema (.shape) + output schema
 │   ├── searchSchema.ts    # searchResultSchema is shared by search + eurovoc
@@ -202,10 +206,12 @@ then drives `release.yml`:
   (Claude Desktop, Claude Code, `npx eurlex-mcp-server`).
 - **HTTP** (`src/http.ts`): Express + `StreamableHTTPServerTransport`, one
   `McpServer` **per session**. `POST /mcp` creates/reuses a session, `GET /mcp`
-  is the SSE stream, `DELETE /mcp` tears it down; `GET /health` is the health
-  check. Idle sessions are swept after `SESSION_TTL_MS` (30 min); a 60 req/min
-  rate limit is keyed on the session id (or IP). The Docker `HEALTHCHECK` hits
-  `/health`.
+  is the SSE stream, `DELETE /mcp` tears it down; a request with an unknown or
+  expired session id gets **404** (the client must start a new session with a
+  fresh `initialize`), a request without one where one is required gets 400;
+  `GET /health` is the health check. Idle sessions are swept after
+  `SESSION_TTL_MS` (30 min); a 60 req/min rate limit is keyed on the session id
+  (or IP). The Docker `HEALTHCHECK` hits `/health`.
 
 ### HTTP env vars
 
@@ -262,6 +268,14 @@ Probed against the live endpoint (see dated notes in `cellarClient.ts` /
   Directive is ELI `dir/1995/46` but CELEX `31995L0046`), so ELIs are resolved by
   matching the stored literal via SPARQL — **not** by deriving the CELEX
   arithmetically.
+- **`cdm:resource_legal_date_entry-into-force` is multi-valued** — it holds the
+  entry-into-force date *and* every application date (GDPR: 2016-05-24 + 2018-05-25;
+  AI Act: 5 values). SPARQL cannot tell them apart; the type (`EV` / `MA`, partial via
+  `{MA/PART|…}` in the comment) exists only in the REST notice
+  (`Accept: application/xml;notice=object`, ~0.1–2 MB per act). `eurlex_metadata`
+  aggregates in SPARQL (`GROUP BY ?work`) and fetches the notice in parallel.
+  Known upstream data error: DSA 32022R2065 carries `2022-02-17` typed `MA`
+  (should be 2024-02-17).
 - **OJ series letter ≠ act type**: an OJ ref like `OJ:L_202401689` encodes only
   the series (`L` = legislation) and a running number; R/L/D can't be inferred
   from it → a SPARQL lookup resolves the real CELEX.
