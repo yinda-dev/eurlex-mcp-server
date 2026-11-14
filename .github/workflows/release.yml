@@ -14,15 +14,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v5
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -35,152 +35,7 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Generate release notes
-        id: notes
-        run: |
-          # Find previous tag
-          PREV_TAG=$(git tag --sort=-version:refname | head -2 | tail -1)
-          CURRENT_TAG=${GITHUB_REF#refs/tags/}
-
-          if [ "$PREV_TAG" = "$CURRENT_TAG" ]; then
-            # First release — use all commits
-            COMMITS=$(git log --oneline --no-merges "$CURRENT_TAG")
-          else
-            COMMITS=$(git log --oneline --no-merges "$PREV_TAG..$CURRENT_TAG")
-          fi
-
-          # Group commits by conventional commit type
-          FEATURES=$(echo "$COMMITS" | grep -E '^\w+ feat(\(.+\))?:' | sed 's/^\w\+ feat\(([^)]*)\)\?:\s*//' || true)
-          FIXES=$(echo "$COMMITS" | grep -E '^\w+ fix(\(.+\))?:' | sed 's/^\w\+ fix\(([^)]*)\)\?:\s*//' || true)
-          DOCS=$(echo "$COMMITS" | grep -E '^\w+ docs(\(.+\))?:' | sed 's/^\w\+ docs\(([^)]*)\)\?:\s*//' || true)
-          CI_CHORE=$(echo "$COMMITS" | grep -E '^\w+ (ci|chore|refactor|test)(\(.+\))?:' | sed 's/^\w\+ \w\+\(([^)]*)\)\?:\s*//' || true)
-
-          # Build release notes
-          NOTES="## What's Changed"$'\n'
-
-          if [ -n "$FEATURES" ]; then
-            NOTES+=$'\n'"### Features"$'\n'
-            while IFS= read -r line; do
-              NOTES+="- $line"$'\n'
-            done <<< "$FEATURES"
-          fi
-
-          if [ -n "$FIXES" ]; then
-            NOTES+=$'\n'"### Bug Fixes"$'\n'
-            while IFS= read -r line; do
-              NOTES+="- $line"$'\n'
-            done <<< "$FIXES"
-          fi
-
-          if [ -n "$DOCS" ]; then
-            NOTES+=$'\n'"### Documentation"$'\n'
-            while IFS= read -r line; do
-              NOTES+="- $line"$'\n'
-            done <<< "$DOCS"
-          fi
-
-          if [ -n "$CI_CHORE" ]; then
-            NOTES+=$'\n'"### Other"$'\n'
-            while IFS= read -r line; do
-              NOTES+="- $line"$'\n'
-            done <<< "$CI_CHORE"
-          fi
-
-          NOTES+=$'\n'"**Full Changelog**: https://github.com/${{ github.repository }}/compare/$PREV_TAG...$CURRENT_TAG"
-
-          # Write to file for the release step
-          echo "$NOTES" > release-notes.md
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          body_path: release-notes.md
-
-  publish-npm:
-    name: Publish to npm
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v5
-
-      # No registry-url here: setup-node would write an .npmrc authToken
-      # placeholder (with a dummy NODE_AUTH_TOKEN), which makes pnpm send the
-      # dummy token instead of attempting the OIDC exchange.
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # Trusted publishing requires npm >= 11.5.1; Node 24 ships a newer npm,
-      # but pin the upgrade explicitly so publish doesn't depend on whatever
-      # setup-node happens to bundle.
-      - name: Update npm CLI
-        run: npm install -g npm@latest
-
-      # Auth via npm Trusted Publishing (OIDC) — no NPM_TOKEN needed. The
-      # trusted publisher for this repo/workflow is configured on npmjs.com.
-      # prepublishOnly runs check + build via pnpm.
-      - name: Publish to npm
-        run: npm publish --provenance --access public
-
-  deploy-lightsail:
-    name: Deploy to Lightsail
-    needs: release
-    runs-on: ubuntu-latest
-    env:
-      AWS_REGION: eu-central-1
-      SERVICE_NAME: eurlex-mcp
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Install Lightsail plugin
-        run: |
-          curl -s "https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl" \
-            -o /usr/local/bin/lightsailctl && chmod +x /usr/local/bin/lightsailctl
-
-      - name: Build and push image
-        run: |
-          docker build --platform linux/amd64 -t $SERVICE_NAME .
-          aws lightsail push-container-image \
-            --service-name $SERVICE_NAME \
-            --label $SERVICE_NAME \
-            --image $SERVICE_NAME:latest \
-            --region $AWS_REGION 2>&1 | tee push-output.txt
-
-      - name: Deploy
-        run: |
-          IMAGE=$(grep -oP '":[\w.-]+"' push-output.txt | tr -d '"')
-          aws lightsail create-container-service-deployment \
-            --service-name $SERVICE_NAME \
-            --region $AWS_REGION \
-            --containers "{
-              \"$SERVICE_NAME\": {
-                \"image\": \"$IMAGE\",
-                \"ports\": {\"3001\": \"HTTP\"},
-                \"environment\": {}
-              }
-            }" \
-            --public-endpoint "{
-              \"containerName\": \"$SERVICE_NAME\",
-              \"containerPort\": 3001,
-              \"healthCheck\": {\"path\": \"/health\", \"intervalSeconds\": 30}
-            }"
+          generate_release_notes: true
